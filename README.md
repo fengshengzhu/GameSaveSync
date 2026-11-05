@@ -6,6 +6,8 @@
 [![Python](https://img.shields.io/badge/Python-3.9%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)](#)
 
+![主界面](assets/screenshot.png)
+
 > A zero-dependency Windows tool that keeps game save folders in sync between two PCs over LAN or public IPv6. Bidirectional, block-level incremental transfer, optional mirror-delete, tray icon. No cloud account required.
 
 ---
