@@ -1,0 +1,16 @@
+{
+  "device_name": "MyPC",
+  "token": "改成两端一致的配对码",
+  "port": 29876,
+  "shares": [
+    {
+      "name": "赛博朋克2077",
+      "path": "C:\\Users\\你的用户名\\Saved Games\\CD Projekt Red\\Cyberpunk 2077"
+    }
+  ],
+  "auto_sync": true,
+  "interval": 10,
+  "delete_mirror": false,
+  "manual_peers": [],
+  "platform": "Windows"
+}
