@@ -86,7 +86,11 @@ python -m PyInstaller -F -w -n GameSaveSync run.py
 
 ## 配置文件
 
-首次运行在程序同目录生成 `sync_config.json`（已被 `.gitignore` 排除，**含配对码，不要提交**）。字段示例见 [`sync_config.example.json`](sync_config.example.json)。
+首次运行在数据目录生成 `sync_config.json`（**含配对码，不要提交**）。字段示例见 [`sync_config.example.json`](sync_config.example.json)。
+
+- **打包版（exe）**：`%APPDATA%\GameSaveSync\sync_config.json`（还有 WebDAV 备份状态 `webdav_state.json`）。exe 本身不产生任何文件，可以放在桌面、下载等任意位置；旧版本写在 exe 旁边的配置会在首次启动时自动迁移过来。
+- **源码运行**：项目根目录。
+- 界面「选项与关于」页可查看当前路径并一键打开。
 
 | 字段 | 说明 |
 |---|---|

@@ -1,44 +1,65 @@
 # -*- coding: utf-8 -*-
-"""配置管理：配置文件保存在程序（或脚本）所在目录的 sync_config.json。
+"""配置管理。
 
-注意：PyInstaller 单文件模式下 __file__ 位于每次启动都不同的临时解压目录
-（%TEMP%\\_MEIxxxxxx，退出即删除），绝不能用来定位配置，否则保存的设置
-会在关闭程序后丢失。此时改用 exe 所在目录（便携式）；若该目录不可写
-（例如装在 Program Files），退回 %APPDATA%\\GameSaveSync。
+数据目录规则：
+  - 打包运行（PyInstaller）：统一放 %APPDATA%\\GameSaveSync。exe 可能被用户放在
+    桌面、下载等任意位置，不应在这些地方生成文件；且 PyInstaller 单文件模式的
+    __file__ 位于每次启动都不同的临时解压目录（%TEMP%\\_MEIxxxxxx，退出即删除），
+    绝不能用来定位配置。
+  - 源码运行：用项目目录，方便开发调试。
+启动时会调用 migrate_legacy_files() 把旧版本放在 exe 旁边的配置迁移到新位置。
 """
 import json
 import os
+import re
+import shutil
 import socket
 import secrets
 import platform
 import sys
 
 
-def _writable(dir_path: str) -> bool:
-    try:
-        probe = os.path.join(dir_path, ".gss_write_probe")
-        with open(probe, "w", encoding="utf-8") as f:
-            f.write("ok")
-        os.remove(probe)
-        return True
-    except OSError:
-        return False
-
-
 def _app_dir() -> str:
     if getattr(sys, "frozen", False):
-        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-        if _writable(exe_dir):
-            return exe_dir  # 便携式：配置与 exe 同行，换机器时一起带走
-        fallback = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"),
-                                "GameSaveSync")
-        os.makedirs(fallback, exist_ok=True)
-        return fallback
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        app_dir = os.path.join(base, "GameSaveSync")
+    else:
+        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.makedirs(app_dir, exist_ok=True)
+    return app_dir
 
 
 APP_DIR = _app_dir()
 CONFIG_PATH = os.path.join(APP_DIR, "sync_config.json")
+
+VERSION = "1.2.0"
+
+# 旧版本（v1.1.1 及之前）可能写在 exe 旁边的文件
+LEGACY_FILES = ("sync_config.json", "webdav_state.json")
+
+
+def migrate_legacy_files() -> list:
+    """把旧版本遗留在 exe 同目录的配置/状态文件迁移到 APP_DIR。
+
+    只在目标位置没有同名文件时移动（不覆盖新数据）；返回日志行列表。
+    """
+    if not getattr(sys, "frozen", False):
+        return []
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    if os.path.normcase(exe_dir) == os.path.normcase(APP_DIR):
+        return []
+    moved = []
+    for name in LEGACY_FILES:
+        src = os.path.join(exe_dir, name)
+        dst = os.path.join(APP_DIR, name)
+        if os.path.isfile(src) and not os.path.exists(dst):
+            try:
+                # exe 可能与 APPDATA 在不同分区，os.replace 无法跨盘移动，用 shutil.move
+                shutil.move(src, dst)
+                moved.append(f"已迁移 {name} -> {dst}")
+            except OSError:
+                pass
+    return moved
 
 DEFAULT_PORT = 29876
 DISCOVERY_PORT = 39876
@@ -206,6 +227,19 @@ class Config:
     def webdav_shares(self) -> list:
         """要备份的共享夹名称列表；为空表示备份全部。"""
         return [str(x) for x in self.raw.get("webdav_shares", []) if str(x).strip()]
+
+    # ---- 窗口尺寸记忆 ----
+    @property
+    def window_geometry(self) -> str:
+        """形如 '780x620' 的窗口尺寸；无效或缺失时返回空串。"""
+        g = str(self.raw.get("window_geometry") or "")
+        return g if re.fullmatch(r"\d{3,5}x\d{3,5}", g) else ""
+
+    @window_geometry.setter
+    def window_geometry(self, v: str):
+        v = str(v or "").strip()
+        if re.fullmatch(r"\d{3,5}x\d{3,5}", v):
+            self.raw["window_geometry"] = v
 
     def save(self):
         self.raw["platform"] = platform.system()
