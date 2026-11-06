@@ -183,6 +183,16 @@ class Config:
         self.raw["webdav_pass"] = str(v)
 
     @property
+    def webdav_insecure(self) -> bool:
+        """跳过 TLS 证书校验：仅用于自签名证书或证书链异常（如系统证书库里的
+        过期交叉证书导致 verify failed）的自建服务器。流量仍然加密。"""
+        return bool(self.raw.get("webdav_insecure", False))
+
+    @webdav_insecure.setter
+    def webdav_insecure(self, v: bool):
+        self.raw["webdav_insecure"] = bool(v)
+
+    @property
     def webdav_dir(self) -> str:
         """远端根目录（相对 WebDAV 地址），默认 GameSaveSync。"""
         d = str(self.raw.get("webdav_dir") or "").strip().strip("/")
@@ -227,6 +237,7 @@ def load() -> Config:
         "webdav_url": "",
         "webdav_user": "",
         "webdav_pass": "",
+        "webdav_insecure": False,
         "webdav_dir": "GameSaveSync",
         "webdav_shares": [],
     }

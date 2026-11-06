@@ -13,6 +13,7 @@ import base64
 import email.utils
 import json
 import os
+import ssl
 import threading
 import time
 import urllib.error
@@ -34,12 +35,21 @@ class WebDavError(Exception):
 class Client:
     """极简 WebDAV 客户端，只做备份与恢复需要的几种操作。"""
 
-    def __init__(self, base_url: str, username: str, password: str):
+    def __init__(self, base_url: str, username: str, password: str, insecure: bool = False):
         self.base = base_url.rstrip("/")
         if not self.base:
             raise WebDavError("WebDAV 地址为空")
         cred = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
         self.auth = "Basic " + cred
+        # insecure=True：跳过证书校验（自签名证书，或证书链里有过期交叉证书导致
+        # Windows/Python 证书库验证失败）。TLS 加密仍然生效，只是不校验服务器身份。
+        # 明文 HTTP 地址不需要上下文，避免无谓地枚举系统证书库。
+        if not self.base.lower().startswith("https"):
+            self._context = None
+        elif insecure:
+            self._context = ssl._create_unverified_context()
+        else:
+            self._context = ssl.create_default_context()
 
     def _url(self, segments):
         """segments: 已按 '/' 拆分的相对路径列表，逐段百分号编码。"""
@@ -53,7 +63,7 @@ class Client:
         for k, v in (headers or {}).items():
             req.add_header(k, v)
         try:
-            return urllib.request.urlopen(req, timeout=timeout)
+            return urllib.request.urlopen(req, timeout=timeout, context=self._context)
         except urllib.error.HTTPError as e:
             # 4xx/5xx 交由调用方按状态码处理
             return e
@@ -159,7 +169,9 @@ class Client:
             body = r.read()
         finally:
             r.close()
-        prefix = urllib.parse.urlsplit(self._url(segments)).path.rstrip("/")
+        # 前缀必须同样做百分号解码：中文/空格目录名在 URL 里是编码形式，
+        # 若拿编码后的前缀去比解码后的 href，目录自身会被误当成子项。
+        prefix = urllib.parse.unquote(urllib.parse.urlsplit(self._url(segments)).path).rstrip("/")
         out = []
         try:
             root = ET.fromstring(body)
@@ -270,7 +282,8 @@ class BackupWorker:
             self._run_locked(manual)
 
     def _run_locked(self, manual=False):
-        client = Client(self.cfg.webdav_url, self.cfg.webdav_user, self.cfg.webdav_pass)
+        client = Client(self.cfg.webdav_url, self.cfg.webdav_user,
+                        self.cfg.webdav_pass, insecure=self.cfg.webdav_insecure)
         base = [s for s in self.cfg.webdav_dir.split("/") if s]
         for share in self._targets():
             root = self.cfg.share_path(share)
@@ -356,7 +369,8 @@ class BackupWorker:
             return self._restore_locked(share, mode, root)
 
     def _restore_locked(self, share: str, mode: str, root: str) -> int:
-        client = Client(self.cfg.webdav_url, self.cfg.webdav_user, self.cfg.webdav_pass)
+        client = Client(self.cfg.webdav_url, self.cfg.webdav_user,
+                        self.cfg.webdav_pass, insecure=self.cfg.webdav_insecure)
         base = [s for s in self.cfg.webdav_dir.split("/") if s]
         cloud = self._cloud_walk(client, base, share)
         if not cloud:

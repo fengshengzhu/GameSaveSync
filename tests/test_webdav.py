@@ -127,9 +127,10 @@ class MockDavHandler(BaseHTTPRequestHandler):
 
 
 def xml_item(href, is_file, store):
-    """构造单个 <D:response>。"""
+    """构造单个 <D:response>。href 按真实服务器习惯做百分号编码。"""
     k = href.lstrip("/")
     lm = email.utils.formatdate(store["mtimes"].get(k, time.time()), usegmt=True)
+    href_quoted = urllib.parse.quote(href)
     if is_file:
         size = len(store["files"][k])
         prop = (f"<D:getlastmodified>{lm}</D:getlastmodified>"
@@ -138,7 +139,7 @@ def xml_item(href, is_file, store):
     else:
         prop = (f"<D:getlastmodified>{lm}</D:getlastmodified>"
                 "<D:resourcetype><D:collection/></D:resourcetype>")
-    return f"<D:response><D:href>{href}</D:href><D:propstat><D:prop>{prop}</D:prop></D:propstat></D:response>"
+    return f"<D:response><D:href>{href_quoted}</D:href><D:propstat><D:prop>{prop}</D:prop></D:propstat></D:response>"
 
 
 def make_server():
@@ -235,6 +236,32 @@ class WebDavBackupTest(unittest.TestCase):
         c = Client(f"http://127.0.0.1:{self.srv.server_port}/dav", "user", "wrong")
         with self.assertRaises(WebDavError):
             c.exists(["dav", "x"])
+
+    def test_insecure_flag_disables_cert_check(self):
+        """insecure=True 时不应校验证书；默认必须校验。"""
+        import ssl
+        strict = Client("https://example.com/dav", "u", "p")
+        self.assertEqual(strict._context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(strict._context.check_hostname)
+
+        lax = Client("https://example.com/dav", "u", "p", insecure=True)
+        self.assertEqual(lax._context.verify_mode, ssl.CERT_NONE)
+        self.assertFalse(lax._context.check_hostname)
+
+    def test_chinese_share_name(self):
+        """中文（URL 百分号编码）目录名：不能把目录自身当成子项。"""
+        self._write("s1.sav", b"S1")
+        cfg = self._cfg(shares=[{"name": "黑旗", "path": self.share}])
+        w, _ = self._worker(cfg)
+        w.run_once()
+
+        c = Client(cfg.webdav_url, cfg.webdav_user, cfg.webdav_pass)
+        names = [n for n, d, s, m in c.list_dir(["GameSaveSync", "黑旗"])]
+        self.assertEqual(names, ["s1.sav"])
+
+        os.remove(os.path.join(self.share, "s1.sav"))
+        self.assertEqual(w.restore("黑旗", "missing"), 1)
+        self.assertEqual(open(os.path.join(self.share, "s1.sav"), "rb").read(), b"S1")
 
     def test_disabled_noop(self):
         self._write("a.sav", b"AAA")

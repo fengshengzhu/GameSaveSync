@@ -147,6 +147,13 @@ class App:
                            "Cloudreve 需开启 WebDAV）",
                   foreground="#888").pack(side="left", padx=6)
 
+        wd2 = ttk.Frame(wd)
+        wd2.pack(fill="x", padx=4)
+        self.var_wd_insecure = tk.BooleanVar(value=self.cfg.webdav_insecure)
+        ttk.Checkbutton(wd2, text="忽略证书错误", variable=self.var_wd_insecure).pack(side="left")
+        ttk.Label(wd2, text="仅用于自签名证书或证书链异常（如 CA 交叉证书过期）：流量仍加密，但不校验服务器身份",
+                  foreground="#888").pack(side="left", padx=4)
+
         # 日志
         logf = ttk.LabelFrame(self.root, text="日志")
         logf.pack(fill="both", expand=True, **pad)
@@ -199,6 +206,7 @@ class App:
         self.cfg.webdav_url = self.ent_wd_url.get()
         self.cfg.webdav_user = self.ent_wd_user.get()
         self.cfg.webdav_pass = self.ent_wd_pass.get()
+        self.cfg.webdav_insecure = self.var_wd_insecure.get()
         self.cfg.save()
 
     def _save_webdav(self):

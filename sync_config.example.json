@@ -16,6 +16,7 @@
   "webdav_url": "http://你的Cloudreve地址/dav",
   "webdav_user": "webdav用户名",
   "webdav_pass": "webdav密码",
+  "webdav_insecure": false,
   "webdav_dir": "GameSaveSync",
   "webdav_shares": [],
   "platform": "Windows"
