@@ -27,6 +27,7 @@
 - **删除镜像（可选，默认关）**：开启后本机删除的文件会同步删除对端同名文件，并清理变空的子目录。
 - **托盘最小化**：关闭窗口即缩到系统托盘，后台继续同步；单击恢复窗口，右键菜单可显示/退出。
 - **配对码保护**：HMAC-SHA256 挑战应答，配对码不明文上网；端口被陌生人扫到也连不上。
+- **WebDAV 云盘备份**：把共享夹自动备份到 Cloudreve、坚果云、Nextcloud 等支持 WebDAV 的网盘，与 P2P 同步相互独立。
 - **安全落地**：接收端拒绝 `..` 和绝对路径，防目录穿越；控制消息有长度上限；传输保留原始修改时间。
 
 ## 快速开始
@@ -96,6 +97,28 @@ python -m PyInstaller -F -w -n GameSaveSync run.py
 | `auto_sync` / `interval` | 自动同步开关与间隔秒数（最小 3） |
 | `delete_mirror` | 是否传播删除，默认 `false` |
 | `manual_peers` | 手动记录的对端地址 |
+| `webdav_*` | 云盘备份配置，见下节 |
+
+## WebDAV 云盘备份（Cloudreve 等）
+
+除了两台电脑互相同步，还可以把共享夹**自动备份到 WebDAV 网盘**（Cloudreve、坚果云、Nextcloud、Alist 等）。它与 P2P 同步相互独立：没有第二台电脑也能单独当云备份用。
+
+### Cloudreve 开启步骤
+
+1. 管理面板 → 用户组 → 编辑你的用户组 → 勾选 **WebDAV 权限**（读写）。
+2. 右上角头像 → **WebDAV** → 新建账户，得到用户名和密码（不是登录密码）。
+3. WebDAV 地址为 `http://你的Cloudreve地址/dav`。
+
+### 本工具配置
+
+在界面「WebDAV 云盘备份」区填入地址、用户名、密码，勾选「启用」后点「保存」。之后：
+
+- **自动备份**：随同步间隔周期比对本地扫描与已上传状态，只上传有变化的文件（状态记录在程序目录 `webdav_state.json`，首次运行会全量上传）。
+- **远端目录**：`<WebDAV地址>/<webdav_dir，默认 GameSaveSync>/<共享夹名>/<相对路径>`，目录自动逐级创建。
+- **删除联动**：勾选了「删除镜像」时，本机删除也会删除云端对应文件；默认只增不删。
+- **立即备份**：按钮手动触发一次全量比对。
+
+> 提示：坚果云免费版有流量限制（上传 1GB/月）；大体积存档建议用自建 Cloudreve 或 Nextcloud。WebDAV 传输未加密，公网服务器请使用 HTTPS 地址。
 
 ## 项目结构
 
@@ -109,6 +132,7 @@ GameSaveSync/
 │  ├─ protocol.py            # 长度帧协议、清单扫描、LWW 决策、分块增量
 │  ├─ discovery.py           # IPv4 广播 + IPv6 组播发现
 │  ├─ engine.py              # 双栈 TCP 监听、HMAC 握手、同步轮、删除传播
+│  ├─ webdav.py              # WebDAV 云盘备份（Cloudreve 等，纯标准库）
 │  ├─ tray.py                # 系统托盘（纯 ctypes）
 │  └─ app.py                 # tkinter 界面
 └─ tests/
@@ -174,6 +198,7 @@ A dependency-free Windows tool that syncs game save folders between two PCs — 
 - Optional mirror-delete (off by default, so a stray delete never wipes the other machine)
 - Atomic writes (`*.part` + `os.replace`), original mtime preserved
 - HMAC-SHA256 pairing handshake, path-traversal protection on the receiving side
+- WebDAV cloud backup (Cloudreve/Nutstore/Nextcloud) — incremental, independent of P2P sync
 - Tray icon: closing the window keeps syncing in the background
 
 **Quick start**

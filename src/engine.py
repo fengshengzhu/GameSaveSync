@@ -8,6 +8,7 @@ import time
 from . import config as cfgmod
 from . import protocol as P
 from .discovery import Discovery
+from .webdav import BackupWorker
 
 
 def parse_target(text: str):
@@ -41,6 +42,7 @@ class SyncEngine:
         self._conns = {}  # peer_name -> {"sock", "addr", "lock", "shares":set}
         self._conn_lock = threading.Lock()
         self._last_scan = {}  # (peer_name, share) -> 上次同步轮的本地清单，用于检测本机删除
+        self.webdav = BackupWorker(cfg, log)  # WebDAV 云盘备份，与 P2P 同步独立
         self.running = False
 
     # ---------------- 生命周期 ----------------
@@ -60,11 +62,13 @@ class SyncEngine:
         threading.Thread(target=self._accept_loop, daemon=True).start()
         threading.Thread(target=self._auto_loop, daemon=True).start()
         self.discovery.start()
+        self.webdav.start()
         self.log(f"服务已启动，监听端口 {self.cfg.port}（同时接受 IPv4 与 IPv6）")
 
     def stop(self):
         self._stop.set()
         self.discovery.stop()
+        self.webdav.stop()
         try:
             self._listener and self._listener.close()
         except OSError:

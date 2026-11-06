@@ -118,6 +118,54 @@ class Config:
     def manual_peers(self) -> list:
         return [str(x) for x in self.raw.get("manual_peers", []) if str(x).strip()]
 
+    # ---- WebDAV 云盘备份（Cloudreve 等）----
+    @property
+    def webdav_enabled(self) -> bool:
+        return bool(self.raw.get("webdav_enabled", False))
+
+    @webdav_enabled.setter
+    def webdav_enabled(self, v: bool):
+        self.raw["webdav_enabled"] = bool(v)
+
+    @property
+    def webdav_url(self) -> str:
+        return str(self.raw.get("webdav_url") or "").strip()
+
+    @webdav_url.setter
+    def webdav_url(self, v: str):
+        self.raw["webdav_url"] = str(v).strip()
+
+    @property
+    def webdav_user(self) -> str:
+        return str(self.raw.get("webdav_user") or "")
+
+    @webdav_user.setter
+    def webdav_user(self, v: str):
+        self.raw["webdav_user"] = str(v).strip()
+
+    @property
+    def webdav_pass(self) -> str:
+        return str(self.raw.get("webdav_pass") or "")
+
+    @webdav_pass.setter
+    def webdav_pass(self, v: str):
+        self.raw["webdav_pass"] = str(v)
+
+    @property
+    def webdav_dir(self) -> str:
+        """远端根目录（相对 WebDAV 地址），默认 GameSaveSync。"""
+        d = str(self.raw.get("webdav_dir") or "").strip().strip("/")
+        return d or "GameSaveSync"
+
+    @webdav_dir.setter
+    def webdav_dir(self, v: str):
+        self.raw["webdav_dir"] = str(v).strip().strip("/")
+
+    @property
+    def webdav_shares(self) -> list:
+        """要备份的共享夹名称列表；为空表示备份全部。"""
+        return [str(x) for x in self.raw.get("webdav_shares", []) if str(x).strip()]
+
     def save(self):
         self.raw["platform"] = platform.system()
         tmp = CONFIG_PATH + ".tmp"
@@ -144,6 +192,12 @@ def load() -> Config:
         "interval": 10,
         "delete_mirror": False,
         "manual_peers": [],
+        "webdav_enabled": False,
+        "webdav_url": "",
+        "webdav_user": "",
+        "webdav_pass": "",
+        "webdav_dir": "GameSaveSync",
+        "webdav_shares": [],
     }
     cfg = Config(data)
     cfg.save()

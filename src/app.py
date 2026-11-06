@@ -122,6 +122,29 @@ class App:
         ttk.Label(opt, text="（默认只新增/覆盖，不删除文件，避免误删存档）",
                   foreground="#888").pack(side="left", padx=8)
 
+        # WebDAV 云盘备份
+        wd = ttk.LabelFrame(self.root, text="WebDAV 云盘备份（Cloudreve / 坚果云 / Nextcloud 等）")
+        wd.pack(fill="x", **pad)
+        self.var_webdav = tk.BooleanVar(value=self.cfg.webdav_enabled)
+        ttk.Checkbutton(wd, text="启用", variable=self.var_webdav).pack(side="left", padx=4)
+        ttk.Label(wd, text="地址：").pack(side="left")
+        self.ent_wd_url = ttk.Entry(wd, width=26)
+        self.ent_wd_url.insert(0, self.cfg.webdav_url)
+        self.ent_wd_url.pack(side="left")
+        ttk.Label(wd, text="用户名：").pack(side="left")
+        self.ent_wd_user = ttk.Entry(wd, width=14)
+        self.ent_wd_user.insert(0, self.cfg.webdav_user)
+        self.ent_wd_user.pack(side="left")
+        ttk.Label(wd, text="密码：").pack(side="left")
+        self.ent_wd_pass = ttk.Entry(wd, width=14, show="*")
+        self.ent_wd_pass.insert(0, self.cfg.webdav_pass)
+        self.ent_wd_pass.pack(side="left")
+        ttk.Button(wd, text="保存", command=self._save_webdav).pack(side="left", padx=6)
+        ttk.Button(wd, text="立即备份", command=self._webdav_backup_now).pack(side="left")
+        ttk.Label(wd, text="（备份到 <地址>/GameSaveSync/<共享夹名>，随同步周期自动进行；"
+                           "Cloudreve 需开启 WebDAV）",
+                  foreground="#888").pack(side="left", padx=6)
+
         # 日志
         logf = ttk.LabelFrame(self.root, text="日志")
         logf.pack(fill="both", expand=True, **pad)
@@ -167,6 +190,26 @@ class App:
         except ValueError:
             pass
         self.cfg.save()
+
+    def _save_webdav(self):
+        self.cfg.webdav_enabled = self.var_webdav.get()
+        self.cfg.webdav_url = self.ent_wd_url.get()
+        self.cfg.webdav_user = self.ent_wd_user.get()
+        self.cfg.webdav_pass = self.ent_wd_pass.get()
+        self.cfg.save()
+        messagebox.showinfo("已保存", "WebDAV 设置已保存。\n"
+                            "若服务正在运行，备份将按同步间隔自动进行；"
+                            "也可点「立即备份」马上上传一次。")
+
+    def _webdav_backup_now(self):
+        # 先把当前输入保存下来再备份，避免「改了没保存就备份」的困惑
+        self.cfg.webdav_enabled = self.var_webdav.get()
+        self.cfg.webdav_url = self.ent_wd_url.get()
+        self.cfg.webdav_user = self.ent_wd_user.get()
+        self.cfg.webdav_pass = self.ent_wd_pass.get()
+        self.cfg.save()
+        threading.Thread(target=self.engine.webdav.run_once,
+                         kwargs={"manual": True}, daemon=True).start()
 
     def _refresh_addresses(self):
         self.lst_addr.delete(0, "end")
