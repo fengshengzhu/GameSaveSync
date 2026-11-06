@@ -1,12 +1,43 @@
 # -*- coding: utf-8 -*-
-"""配置管理：配置文件保存在程序（或脚本）所在目录的 sync_config.json。"""
+"""配置管理：配置文件保存在程序（或脚本）所在目录的 sync_config.json。
+
+注意：PyInstaller 单文件模式下 __file__ 位于每次启动都不同的临时解压目录
+（%TEMP%\\_MEIxxxxxx，退出即删除），绝不能用来定位配置，否则保存的设置
+会在关闭程序后丢失。此时改用 exe 所在目录（便携式）；若该目录不可写
+（例如装在 Program Files），退回 %APPDATA%\\GameSaveSync。
+"""
 import json
 import os
 import socket
 import secrets
 import platform
+import sys
 
-APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def _writable(dir_path: str) -> bool:
+    try:
+        probe = os.path.join(dir_path, ".gss_write_probe")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(probe)
+        return True
+    except OSError:
+        return False
+
+
+def _app_dir() -> str:
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        if _writable(exe_dir):
+            return exe_dir  # 便携式：配置与 exe 同行，换机器时一起带走
+        fallback = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"),
+                                "GameSaveSync")
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+APP_DIR = _app_dir()
 CONFIG_PATH = os.path.join(APP_DIR, "sync_config.json")
 
 DEFAULT_PORT = 29876

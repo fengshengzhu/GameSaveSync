@@ -30,6 +30,7 @@ class App:
         self._poll_log()
         self._poll_tray()
         self._poll_peers()
+        self._enqueue_log(f"配置文件：{cfgmod.CONFIG_PATH}")
         # 关闭按钮 = 最小化到托盘（Windows）；其他平台直接退出
         if traymod.available():
             root.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
