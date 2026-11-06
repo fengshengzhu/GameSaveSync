@@ -2,19 +2,23 @@
 """WebDAV 云盘备份（Cloudreve / 坚果云 / Nextcloud 等）。
 
 纯标准库实现：
-  - Client: PROPFIND / MKCOL / PUT / DELETE + Basic 认证，URL 逐段编码
+  - Client: PROPFIND / MKCOL / PUT / GET / DELETE + Basic 认证，URL 逐段编码
   - BackupWorker: 后台线程按间隔比对本地扫描与已上传状态，只上传有变化的文件；
-    delete_mirror 开启时联动删除远端文件。状态持久化在 webdav_state.json。
+    delete_mirror 开启时联动删除远端文件；支持手动从云端恢复到本地。
+    状态持久化在 webdav_state.json。
 
 远端目录结构：<webdav_url>/<webdav_dir>/<共享夹名>/<相对路径>
 """
 import base64
+import email.utils
 import json
 import os
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 
 from . import config as cfgmod
 from . import protocol as P
@@ -28,7 +32,7 @@ class WebDavError(Exception):
 
 
 class Client:
-    """极简 WebDAV 客户端，只做备份需要的四种操作。"""
+    """极简 WebDAV 客户端，只做备份与恢复需要的几种操作。"""
 
     def __init__(self, base_url: str, username: str, password: str):
         self.base = base_url.rstrip("/")
@@ -113,6 +117,84 @@ class Client:
         if code == 404:
             return False
         raise WebDavError(f"DELETE 返回 {code}")
+
+    # ---------- 恢复所需操作 ----------
+    def get_file(self, segments, dest_path: str):
+        """下载文件到 dest_path（先写 .part 再原子替换），并按服务器时间戳设置 mtime。
+        返回 (size, mtime)。"""
+        r = self.request("GET", segments, timeout=300)
+        try:
+            if r.status != 200:
+                raise WebDavError(f"GET 返回 {r.status}")
+            lm = r.headers.get("Last-Modified")
+            try:
+                mtime = email.utils.parsedate_to_datetime(lm).timestamp() if lm else time.time()
+            except (TypeError, ValueError):
+                mtime = time.time()
+            tmp = dest_path + ".part"
+            os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+            size = 0
+            with open(tmp, "wb") as f:
+                while True:
+                    chunk = r.read(64 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    size += len(chunk)
+            os.replace(tmp, dest_path)
+            os.utime(dest_path, (mtime, mtime))
+            return size, mtime
+        finally:
+            r.close()
+
+    def list_dir(self, segments):
+        """PROPFIND Depth:1 列出目录的直接子项，返回 [(name, is_dir, size, mtime)]。
+        name 为相对该目录的名称；size 对目录为 0。"""
+        r = self.request("PROPFIND", segments, headers={"Depth": "1"})
+        try:
+            if r.status == 404:
+                raise WebDavError("云端目录不存在")
+            if r.status not in (207, 200):
+                raise WebDavError(f"PROPFIND 返回 {r.status}")
+            body = r.read()
+        finally:
+            r.close()
+        prefix = urllib.parse.urlsplit(self._url(segments)).path.rstrip("/")
+        out = []
+        try:
+            root = ET.fromstring(body)
+        except ET.ParseError as e:
+            raise WebDavError(f"PROPFIND 响应解析失败：{e}")
+        # 注意：Element.iter() 不支持 {*} 通配符，必须用 findall
+        for resp in root.findall(".//{*}response"):
+            href_el = resp.find("{*}href")
+            if href_el is None or not href_el.text:
+                continue
+            path = urllib.parse.unquote(urllib.parse.urlsplit(href_el.text).path)
+            if path.rstrip("/") == prefix:
+                continue  # 目录自身
+            name = path.rstrip("/")
+            if name.startswith(prefix):
+                name = name[len(prefix):].lstrip("/")
+            else:
+                name = name.rsplit("/", 1)[-1]
+            if not name or "/" in name:
+                continue  # 服务器返回了超出 Depth:1 的条目
+            is_dir = resp.find(".//{*}collection") is not None
+            size = 0
+            if not is_dir:
+                size_el = resp.find(".//{*}getcontentlength")
+                if size_el is not None and size_el.text and size_el.text.isdigit():
+                    size = int(size_el.text)
+            mtime = 0.0
+            lm_el = resp.find(".//{*}getlastmodified")
+            if lm_el is not None and lm_el.text:
+                try:
+                    mtime = email.utils.parsedate_to_datetime(lm_el.text).timestamp()
+                except (TypeError, ValueError):
+                    mtime = 0.0
+            out.append((name, is_dir, size, mtime))
+        return out
 
 
 class BackupWorker:
@@ -241,3 +323,75 @@ class BackupWorker:
                 self.log(f"[WebDAV] {share}：云端已是最新")
         if manual:
             self.log("[WebDAV] 备份完成")
+
+    # ---------- 恢复 ----------
+    def _cloud_walk(self, client, base, share) -> dict:
+        """递归遍历云端共享夹，返回 {rel: {"size","mtime"}}；rel 用 '/' 分隔。"""
+        out = {}
+
+        def walk(segs, rel_prefix):
+            try:
+                items = client.list_dir(segs)
+            except WebDavError as e:
+                self.log(f"[WebDAV] 列出云端 {share}/{rel_prefix} 失败：{e}")
+                return
+            for name, is_dir, size, mtime in items:
+                rel = f"{rel_prefix}/{name}" if rel_prefix else name
+                if is_dir:
+                    walk(segs + [name], rel)
+                else:
+                    out[rel] = {"size": size, "mtime": mtime}
+
+        walk(base + [share], "")
+        return out
+
+    def restore(self, share: str, mode: str = "missing") -> int:
+        """从云端恢复共享夹到本地，返回恢复的文件数。
+        mode: missing=仅补齐本地缺失的文件；overwrite=云端覆盖本地所有文件。
+        恢复按云端的 Last-Modified 还原修改时间，随后更新本地状态缓存。"""
+        root = self.cfg.share_path(share)
+        if not root:
+            raise WebDavError(f"共享夹 {share} 未配置本地路径")
+        with self._busy:  # 与自动备份互斥，避免并发读写状态
+            return self._restore_locked(share, mode, root)
+
+    def _restore_locked(self, share: str, mode: str, root: str) -> int:
+        client = Client(self.cfg.webdav_url, self.cfg.webdav_user, self.cfg.webdav_pass)
+        base = [s for s in self.cfg.webdav_dir.split("/") if s]
+        cloud = self._cloud_walk(client, base, share)
+        if not cloud:
+            self.log(f"[WebDAV] {share}：云端没有可恢复的文件")
+            return 0
+        os.makedirs(root, exist_ok=True)
+
+        done = 0
+        downloaded = []
+        for rel in sorted(cloud):
+            meta = cloud[rel]
+            dest = os.path.join(root, rel.replace("/", os.sep))
+            if os.path.isfile(dest):
+                if mode == "missing":
+                    continue  # 本地已有：补齐模式下不动
+                if mode == "overwrite" \
+                        and os.path.getsize(dest) == meta["size"] \
+                        and meta["mtime"] \
+                        and abs(os.path.getmtime(dest) - meta["mtime"]) < 0.5:
+                    continue  # 与云端完全一致，跳过
+            try:
+                client.get_file(base + [share] + rel.split("/"), dest)
+                done += 1
+                downloaded.append(rel)
+                self.log(f"[WebDAV] 已恢复 {share}/{rel}")
+            except (WebDavError, OSError) as e:
+                self.log(f"[WebDAV] 恢复 {share}/{rel} 失败：{e}")
+
+        # 恢复下来的文件记入上传状态，避免下一轮备份把刚下载的内容再传一遍
+        scan = P.list_share(root)
+        state = self._state.setdefault(share, {})
+        for rel in downloaded:
+            if rel in scan:
+                state[rel] = {"size": scan[rel]["size"], "mtime": scan[rel]["mtime"]}
+        self._last_scan[share] = scan  # 刷新会话扫描，防止误判删除
+        self._save_state()
+        self.log(f"[WebDAV] {share}：恢复完成，共 {done} 个文件")
+        return done

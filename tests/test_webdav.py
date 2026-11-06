@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""WebDAV 备份端到端测试：内嵌一个最小 WebDAV 服务器（PUT/MKCOL/DELETE/PROPFIND + Basic 认证）。"""
+"""WebDAV 备份端到端测试：内嵌一个最小 WebDAV 服务器（PUT/GET/MKCOL/DELETE/PROPFIND + Basic 认证）。"""
 import base64
+import email.utils
 import os
 import shutil
 import sys
@@ -17,6 +18,9 @@ from src import config as cfgmod
 from src.webdav import BackupWorker, Client, WebDavError
 
 AUTH = "Basic " + base64.b64encode(b"user:pass").decode("ascii")
+
+XML_HEAD = ("<?xml version='1.0' encoding='utf-8'?>"
+            '<D:multistatus xmlns:D="DAV:">')
 
 
 class MockDavHandler(BaseHTTPRequestHandler):
@@ -40,8 +44,10 @@ class MockDavHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _reply(self, code, body=b""):
+    def _reply(self, code, body=b"", headers=None):
         self.send_response(code)
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if body:
@@ -50,14 +56,28 @@ class MockDavHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    # ---------- PROPFIND：Depth:1 列目录 ----------
     def do_PROPFIND(self):
         if not self._check_auth():
             return
         k = self._key()
-        if k in self.store["files"] or k in self.store["dirs"] or k == "":
-            self._reply(207, b"<?xml version='1.0'?><multistatus/>")
-        else:
+        is_file = k in self.store["files"]
+        is_dir = k in self.store["dirs"] or k == ""
+        if not (is_file or is_dir):
             self._reply(404)
+            return
+        parts = [xml_item("/" + k if k else "/", is_file, self.store)]
+        prefix = k + "/" if k else ""
+        depth1 = self.headers.get("Depth", "1") != "0"
+        if depth1:
+            for fk in self.store["files"]:
+                if fk.startswith(prefix) and "/" not in fk[len(prefix):]:
+                    parts.append(xml_item("/" + fk, True, self.store))
+            for dk in self.store["dirs"]:
+                if dk and dk.startswith(prefix) and "/" not in dk[len(prefix):]:
+                    parts.append(xml_item("/" + dk, False, self.store))
+        body = (XML_HEAD + "".join(parts) + "</D:multistatus>").encode("utf-8")
+        self._reply(207, body, {"Content-Type": "application/xml; charset=utf-8"})
 
     def do_MKCOL(self):
         if not self._check_auth():
@@ -76,9 +96,22 @@ class MockDavHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(n)
         k = self._key()
         self.store["files"][k] = body
+        self.store["mtimes"][k] = time.time()
         self.store["dirs"].add(os.path.dirname(k))
         self.server.put_count += 1
         self._reply(201)
+
+    def do_GET(self):
+        if not self._check_auth():
+            return
+        k = self._key()
+        if k not in self.store["files"]:
+            self._reply(404)
+            return
+        body = self.store["files"][k]
+        lm = email.utils.formatdate(self.store["mtimes"].get(k, time.time()), usegmt=True)
+        self._reply(200, body, {"Last-Modified": lm,
+                                "Content-Type": "application/octet-stream"})
 
     def do_DELETE(self):
         if not self._check_auth():
@@ -86,15 +119,31 @@ class MockDavHandler(BaseHTTPRequestHandler):
         k = self._key()
         if k in self.store["files"]:
             del self.store["files"][k]
+            self.store["mtimes"].pop(k, None)
             self.server.delete_count += 1
             self._reply(204)
         else:
             self._reply(404)
 
 
+def xml_item(href, is_file, store):
+    """构造单个 <D:response>。"""
+    k = href.lstrip("/")
+    lm = email.utils.formatdate(store["mtimes"].get(k, time.time()), usegmt=True)
+    if is_file:
+        size = len(store["files"][k])
+        prop = (f"<D:getlastmodified>{lm}</D:getlastmodified>"
+                f"<D:getcontentlength>{size}</D:getcontentlength>"
+                "<D:resourcetype/>")
+    else:
+        prop = (f"<D:getlastmodified>{lm}</D:getlastmodified>"
+                "<D:resourcetype><D:collection/></D:resourcetype>")
+    return f"<D:response><D:href>{href}</D:href><D:propstat><D:prop>{prop}</D:prop></D:propstat></D:response>"
+
+
 def make_server():
     srv = ThreadingHTTPServer(("127.0.0.1", 0), MockDavHandler)
-    srv.store = {"files": {}, "dirs": set()}
+    srv.store = {"files": {}, "dirs": set(), "mtimes": {}}
     srv.put_count = 0
     srv.delete_count = 0
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -192,6 +241,55 @@ class WebDavBackupTest(unittest.TestCase):
         w, _ = self._worker(self._cfg(webdav_enabled=False))
         w.run_once()
         self.assertEqual(self.srv.put_count, 0)
+
+    # ---------- 恢复 ----------
+    def test_restore_missing(self):
+        """补齐模式：云端有本地无的文件拉回来；本地已有的不动；恢复后不重复上传。"""
+        self._write("a.sav", b"AAA", mtime=1000.0)
+        self._write("sub/b.sav", b"BBB", mtime=1000.0)
+        w, _ = self._worker(self._cfg())
+        w.run_once()
+        self.assertEqual(self.srv.put_count, 2)
+
+        # 本地：a.sav 被删（模拟换电脑/存档丢失），b.sav 被改成新版本
+        os.remove(os.path.join(self.share, "a.sav"))
+        self._write("sub/b.sav", b"BBB-NEW-LOCAL", mtime=time.time() + 10)
+
+        w.restore("test", "missing")
+        # 缺失的 a.sav 回来了，内容与 mtime 都是云端版本
+        self.assertEqual(open(os.path.join(self.share, "a.sav"), "rb").read(), b"AAA")
+        # 本地较新的 b.sav 未被覆盖
+        self.assertEqual(open(os.path.join(self.share, "sub/b.sav"), "rb").read(), b"BBB-NEW-LOCAL")
+
+        # 恢复后的 a.sav 已记入状态，下一轮备份只重传被修改的 b.sav
+        w.run_once()
+        self.assertEqual(self.srv.put_count, 3)
+
+    def test_restore_overwrite(self):
+        """覆盖模式：云端版本强制覆盖本地，并把 mtime 还原为云端的上传时间。"""
+        self._write("a.sav", b"CLOUD-VERSION")
+        w, _ = self._worker(self._cfg())
+        t_upload = time.time()
+        w.run_once()
+
+        # 本地被改成不同内容（mtime 也不同）
+        self._write("a.sav", b"LOCAL-DIRTY", mtime=time.time() + 100)
+        w.restore("test", "overwrite")
+
+        p = os.path.join(self.share, "a.sav")
+        self.assertEqual(open(p, "rb").read(), b"CLOUD-VERSION")
+        # 云端 Last-Modified = 上传时刻（WebDAV PUT 不携带客户端 mtime）
+        self.assertLess(abs(os.path.getmtime(p) - t_upload), 5)
+
+        # 内容一致了，再跑一轮不会重新上传
+        w.run_once()
+        self.assertEqual(self.srv.put_count, 1)
+
+    def test_restore_empty_cloud(self):
+        """云端没有该共享夹时不报错，返回 0。"""
+        w, logs = self._worker(self._cfg())
+        self.assertEqual(w.restore("test", "missing"), 0)
+        self.assertTrue(any("没有可恢复" in x for x in logs))
 
 
 if __name__ == "__main__":

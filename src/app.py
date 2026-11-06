@@ -141,6 +141,7 @@ class App:
         self.ent_wd_pass.pack(side="left")
         ttk.Button(wd, text="保存", command=self._save_webdav).pack(side="left", padx=6)
         ttk.Button(wd, text="立即备份", command=self._webdav_backup_now).pack(side="left")
+        ttk.Button(wd, text="从云端恢复…", command=self._webdav_restore_dialog).pack(side="left", padx=6)
         ttk.Label(wd, text="（备份到 <地址>/GameSaveSync/<共享夹名>，随同步周期自动进行；"
                            "Cloudreve 需开启 WebDAV）",
                   foreground="#888").pack(side="left", padx=6)
@@ -191,25 +192,78 @@ class App:
             pass
         self.cfg.save()
 
-    def _save_webdav(self):
+    def _save_webdav_fields(self):
+        """把界面上的 WebDAV 输入写回配置并落盘。"""
         self.cfg.webdav_enabled = self.var_webdav.get()
         self.cfg.webdav_url = self.ent_wd_url.get()
         self.cfg.webdav_user = self.ent_wd_user.get()
         self.cfg.webdav_pass = self.ent_wd_pass.get()
         self.cfg.save()
+
+    def _save_webdav(self):
+        self._save_webdav_fields()
         messagebox.showinfo("已保存", "WebDAV 设置已保存。\n"
                             "若服务正在运行，备份将按同步间隔自动进行；"
                             "也可点「立即备份」马上上传一次。")
 
     def _webdav_backup_now(self):
         # 先把当前输入保存下来再备份，避免「改了没保存就备份」的困惑
-        self.cfg.webdav_enabled = self.var_webdav.get()
-        self.cfg.webdav_url = self.ent_wd_url.get()
-        self.cfg.webdav_user = self.ent_wd_user.get()
-        self.cfg.webdav_pass = self.ent_wd_pass.get()
-        self.cfg.save()
+        self._save_webdav_fields()
         threading.Thread(target=self.engine.webdav.run_once,
                          kwargs={"manual": True}, daemon=True).start()
+
+    def _webdav_restore_dialog(self):
+        self._save_webdav_fields()
+        if not self.cfg.webdav_url or not self.cfg.webdav_user:
+            messagebox.showwarning("无法恢复", "请先填写 WebDAV 服务器地址和用户名。")
+            return
+        if not self.cfg.shares:
+            messagebox.showwarning("无法恢复", "请先添加共享夹。")
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("从云端恢复")
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        frm = ttk.Frame(dlg, padding=14)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="选择共享夹：").grid(row=0, column=0, sticky="w")
+        names = [s["name"] for s in self.cfg.shares]
+        cb = ttk.Combobox(frm, values=names, state="readonly", width=26)
+        cb.current(0)
+        cb.grid(row=0, column=1, sticky="w", padx=4, pady=4)
+
+        mode = tk.StringVar(value="missing")
+        ttk.Radiobutton(frm, text="仅补齐本地缺失的文件（更安全，本地已有的不动）",
+                        variable=mode, value="missing").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Radiobutton(frm, text="云端覆盖本地所有文件（以云端版本为准）",
+                        variable=mode, value="overwrite").grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(frm, text="恢复会从云端下载文件到本地共享夹，并按云端时间还原修改时间；\n"
+                            "下载完成后会自动更新备份状态，不会被下一轮备份重复上传。",
+                  foreground="#888", justify="left").grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(8, 4))
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(8, 0))
+
+        def do_restore():
+            share, m = cb.get(), mode.get()
+            dlg.destroy()
+
+            def work():
+                self.engine.log(f"[WebDAV] 开始从云端恢复 {share}（{'覆盖' if m == 'overwrite' else '补齐'}模式）…")
+                try:
+                    self.engine.webdav.restore(share, m)
+                except Exception as e:
+                    self.engine.log(f"[WebDAV] 恢复失败：{type(e).__name__}: {e}")
+            threading.Thread(target=work, daemon=True).start()
+
+        ttk.Button(btns, text="取消", command=dlg.destroy).pack(side="left", padx=4)
+        ttk.Button(btns, text="开始恢复", command=do_restore).pack(side="left")
 
     def _refresh_addresses(self):
         self.lst_addr.delete(0, "end")
