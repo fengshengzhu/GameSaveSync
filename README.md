@@ -159,7 +159,7 @@ GameSaveSync/
 python -m unittest discover -s tests -v
 ```
 
-CI 在 Ubuntu 与 Windows、Python 3.9 与 3.13 上跑同样的用例。
+全部用例只依赖标准库，任何平台均可直接运行（已在 Windows 与 Ubuntu、Python 3.9 与 3.13 上验证）。
 
 ## 常见问题
 
