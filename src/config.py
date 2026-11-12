@@ -32,7 +32,7 @@ def _app_dir() -> str:
 APP_DIR = _app_dir()
 CONFIG_PATH = os.path.join(APP_DIR, "sync_config.json")
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 # 旧版本（v1.1.1 及之前）可能写在 exe 旁边的文件
 LEGACY_FILES = ("sync_config.json", "webdav_state.json")
@@ -109,7 +109,10 @@ class Config:
 
     @port.setter
     def port(self, v: int):
-        self.raw["port"] = int(v)
+        p = int(v)
+        if not (1024 <= p <= 65535):
+            raise ValueError("端口必须在 1024-65535 之间")
+        self.raw["port"] = p
 
     # ---- 共享文件夹 ----
     @property
@@ -242,6 +245,9 @@ class Config:
             self.raw["window_geometry"] = v
 
     def save(self):
+        # 落盘前把越界的历史值归一化，避免界面显示与运行端口不一致
+        self.raw["port"] = self.port
+        self.raw["interval"] = self.interval
         self.raw["platform"] = platform.system()
         tmp = CONFIG_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:

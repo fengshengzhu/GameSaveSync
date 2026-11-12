@@ -158,8 +158,13 @@ class WebDavBackupTest(unittest.TestCase):
         os.makedirs(self.share)
         self.state_path = os.path.join(self.tmp, "webdav_state.json")
         self.srv = make_server()
-        self.addCleanup(self.srv.shutdown)
-        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+        def _cleanup():
+            self.srv.shutdown()
+            self.srv.server_close()
+            shutil.rmtree(self.tmp, True)
+
+        self.addCleanup(_cleanup)
 
     def _write(self, rel, data, mtime=None):
         p = os.path.join(self.share, rel.replace("/", os.sep))
@@ -317,6 +322,21 @@ class WebDavBackupTest(unittest.TestCase):
         w, logs = self._worker(self._cfg())
         self.assertEqual(w.restore("test", "missing"), 0)
         self.assertTrue(any("没有可恢复" in x for x in logs))
+
+    def test_restore_rejects_unsafe_cloud_names(self):
+        """云端返回 ../ 或反斜杠路径时不能写到共享夹外。"""
+        w, logs = self._worker(self._cfg())
+        base = "dav/GameSaveSync/test/"
+        self.srv.store["dirs"].update(
+            {"dav", "dav/GameSaveSync", "dav/GameSaveSync/test"})
+        evil = base + "..\\evil.sav"
+        self.srv.store["files"][evil] = b"X"
+        self.srv.store["mtimes"][evil] = time.time()
+
+        self.assertEqual(w.restore("test", "missing"), 0)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "evil.sav")))
+        self.assertFalse(os.path.exists(os.path.join(self.share, "..", "evil.sav")))
+        self.assertTrue(any("不安全" in x for x in logs))
 
 
 if __name__ == "__main__":

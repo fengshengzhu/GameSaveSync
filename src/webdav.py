@@ -144,14 +144,21 @@ class Client:
             tmp = dest_path + ".part"
             os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
             size = 0
-            with open(tmp, "wb") as f:
-                while True:
-                    chunk = r.read(64 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    size += len(chunk)
-            os.replace(tmp, dest_path)
+            try:
+                with open(tmp, "wb") as f:
+                    while True:
+                        chunk = r.read(64 * 1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        size += len(chunk)
+                os.replace(tmp, dest_path)
+            except BaseException:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
             os.utime(dest_path, (mtime, mtime))
             return size, mtime
         finally:
@@ -224,17 +231,20 @@ class BackupWorker:
 
     # ---------- 生命周期 ----------
     def start(self):
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(target=self._loop, daemon=True,
+        # 每次都换一个新的停止事件，保证「停止服务 → 启动服务」后备份线程能重新工作
+        stop = threading.Event()
+        self._stop = stop
+        self._thread = threading.Thread(target=self._loop, args=(stop,), daemon=True,
                                         name="GameSaveSync-WebDAV")
         self._thread.start()
 
     def stop(self):
         self._stop.set()
+        # 停止期间删除的文件不应在服务重启后被联动删除到云端
+        self._last_scan.clear()
 
-    def _loop(self):
-        while not self._stop.wait(max(3, self.cfg.interval)):
+    def _loop(self, stop: threading.Event):
+        while not stop.wait(max(3, self.cfg.interval)):
             if not self.cfg.webdav_enabled:
                 continue
             try:
@@ -382,7 +392,11 @@ class BackupWorker:
         downloaded = []
         for rel in sorted(cloud):
             meta = cloud[rel]
-            dest = os.path.join(root, rel.replace("/", os.sep))
+            dest = P.safe_join(root, rel)
+            if not dest:
+                # 云端返回了 ../、驱动器前缀、反斜杠等可疑名字，跳过不写盘
+                self.log(f"[WebDAV] 跳过不安全的云端路径：{rel}")
+                continue
             if os.path.isfile(dest):
                 if mode == "missing":
                     continue  # 本地已有：补齐模式下不动

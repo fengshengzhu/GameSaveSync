@@ -39,6 +39,57 @@ class DecideTest(unittest.TestCase):
         self.assertEqual(plan["push"], ["a"])
 
 
+class SafePathTest(unittest.TestCase):
+    def test_rejects_traversal(self):
+        for bad in ["../x", "a/../../x", "..\\x", "a\\..\\..\\x",
+                    "/etc/passwd", "\\\\srv\\share\\x", "", ".", "a//b", "a/./b"]:
+            self.assertFalse(P.safe_rel(bad), bad)
+
+    def test_accepts_normal_relative_paths(self):
+        for good in ["a.sav", "sub/b.sav", "sub\\b.sav", "中文 存档.sav", "a.b.c"]:
+            self.assertTrue(P.safe_rel(good), good)
+
+    @unittest.skipUnless(os.name == "nt", "Windows 专用路径规则")
+    def test_rejects_windows_escapes(self):
+        for bad in ["D:evil", "C:evil", "file.sav:stream", "CON", "NUL.txt",
+                    "aux", "a.", "a ", "sub/CON.sav"]:
+            self.assertFalse(P.safe_rel(bad), bad)
+
+    def test_safe_join_stays_inside_root(self):
+        with tempfile.TemporaryDirectory() as root:
+            dest = P.safe_join(root, "sub/a.sav")
+            self.assertEqual(os.path.normcase(dest),
+                             os.path.normcase(os.path.join(root, "sub", "a.sav")))
+            self.assertIsNone(P.safe_join(root, "../x"))
+            self.assertIsNone(P.safe_join(root, ".."))
+            self.assertIsNone(P.safe_join(root, ""))
+
+
+class DeltaMessageTest(unittest.TestCase):
+    def test_parse_valid(self):
+        size = P.BLOCK * 2 + 100
+        msg = {"size": size, "block": P.BLOCK, "changed": [0, 2],
+               "dsize": P.BLOCK + 100}
+        data = b"a" * P.BLOCK + b"b" * 100
+        parsed_size, pieces, block = P.parse_delta(msg, data)
+        self.assertEqual((parsed_size, block), (size, P.BLOCK))
+        self.assertEqual(set(pieces), {0, 2})
+        self.assertEqual(len(pieces[2]), 100)
+
+    def test_reject_malformed(self):
+        cases = [
+            ({"size": 100, "block": 50, "changed": [9], "dsize": 10}, b"x" * 10),
+            ({"size": 100, "block": 50, "changed": [0, 0], "dsize": 100}, b"x" * 100),
+            ({"size": 100, "block": 50, "changed": [0], "dsize": 30}, b"x" * 30),
+            ({"size": 100, "block": 0, "changed": [], "dsize": 0}, b""),
+            ({"size": 100, "block": 50, "changed": [0], "dsize": 200}, b"x" * 200),
+            ({"block": 50, "changed": [0], "dsize": 50}, b"x" * 50),
+        ]
+        for msg, data in cases:
+            with self.assertRaises(ValueError, msg=msg):
+                P.parse_delta(msg, data)
+
+
 class DeltaTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="gss-test-")
@@ -109,6 +160,26 @@ class DeltaTest(unittest.TestCase):
         dest = os.path.join(self.tmp, "missing.bin")
         with self.assertRaises(OSError):
             P.apply_delta(dest, len(new), {}, P.BLOCK)
+
+    def test_changed_blocks_respects_scanned_size(self):
+        """扫描后文件变大：只按扫描时的 size 计算，不发送多出来的块。"""
+        data = os.urandom(P.BLOCK * 2)
+        path = self._write("grow.bin", data)
+        hashes = P.block_hashes(path)
+        self.assertEqual(P.changed_blocks(path, P.BLOCK, hashes), [])
+
+    def test_changed_blocks_detects_shrink(self):
+        data = os.urandom(P.BLOCK)
+        path = self._write("shrink.bin", data)
+        with self.assertRaises(P.LocalFileChanged):
+            P.changed_blocks(path, P.BLOCK * 2, [])
+
+    def test_apply_delta_failure_cleans_part_file(self):
+        data = os.urandom(P.BLOCK)
+        dest = os.path.join(self.tmp, "dest.bin")
+        with self.assertRaises(OSError):
+            P.apply_delta(dest, len(data), {}, P.BLOCK)
+        self.assertFalse(os.path.exists(dest + ".part"))
 
 
 if __name__ == "__main__":

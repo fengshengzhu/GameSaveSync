@@ -24,9 +24,10 @@
 - **异地 IPv6 直连**：两端都有运营商公网 IPv6 时，填对端地址直连，不需要公网 IPv4、不需要内网穿透、不需要端口映射。
 - **双向自动同步**：连接后每 N 秒比对清单，按「最后修改时间优先」（LWW）新覆盖旧，新文件自动补齐。
 - **增量传输**：超过 1 MB 的文件先交换 256 KB 分块 MD5 签名，只传变化的块——改一段只传一段（实测 3 MB 存档改 1 块，只传输 8%）。差异过多时自动退回全量。
-- **删除镜像（可选，默认关）**：开启后本机删除的文件会同步删除对端同名文件，并清理变空的子目录。
+- **删除镜像（可选，默认关）**：两端都开启时，任一端删除的文件会同步删除对端同名文件，并清理变空的子目录；任一端关闭时，删除请求会被忽略，文件会在下一轮从对端恢复。
 - **托盘最小化**：关闭窗口即缩到系统托盘，后台继续同步；单击恢复窗口，右键菜单可显示/退出。
-- **配对码保护**：HMAC-SHA256 挑战应答，配对码不明文上网；端口被陌生人扫到也连不上。
+- **配对码保护**：HMAC-SHA256 双向挑战应答（客户端与服务端都要证明持有配对码），配对码不明文上网；端口被陌生人扫到也连不上。
+- **断线保护**：主动连接方每 15 秒发送心跳，被动方 2 分钟收不到任何数据即断开；收发均有超时，不会因对端休眠而永久卡死。
 - **WebDAV 云盘备份**：把共享夹自动备份到 Cloudreve、坚果云、Nextcloud 等支持 WebDAV 的网盘，可随时从云端一键恢复，与 P2P 同步相互独立。
 - **安全落地**：接收端拒绝 `..` 和绝对路径，防目录穿越；控制消息有长度上限；传输保留原始修改时间。
 
@@ -78,11 +79,14 @@ python -m PyInstaller -F -w -n GameSaveSync run.py
 | 文件只在对端有 | 从对端拉取 |
 | 两边都有，本地更新 | 本地覆盖对端（大文件走增量） |
 | 两边都有，对端更新 | 对端覆盖本地（大文件走增量） |
-| 一边删除了文件 | 默认不传播；勾选「删除镜像」后，本机删除会传播到对端 |
+| 一边删除了文件 | 默认不传播；两端都勾选「删除镜像」后，删除会传播到对端 |
 
-- **原子写入**：先写 `*.part` 再 `os.replace`，不会读到半截存档；传输后回写原 mtime。
-- **增量传输**：256 KB 分块 MD5，超过 1 MB 才启用，小文件直接全量（更快）。
-- **删除镜像的边界**：删除事件在同步轮内通过「前后两次扫描」检测，程序未运行期间发生的删除不会被记录；若对端先推回文件，也可能被恢复。它是「尽力而为」的，重要存档仍建议另做备份。
+> 「删除镜像」是双向开关：只有一端开启时，对端发来的删除会被忽略，被删文件下一轮会从对端恢复。这样单边误开不会清空另一台电脑。
+
+- **原子写入**：先写 `*.part` 再 `os.replace`，不会读到半截存档；传输后回写原 mtime。传输失败会清理留下的 `.part`。
+- **增量传输**：256 KB 分块 MD5，超过 1 MB 才启用，小文件直接全量（更快）；接收端会校验块索引与数据长度，不完整或异常时拒绝写入。
+- **删除镜像的边界**：删除事件在同步轮内通过「前后两次扫描」检测，程序未运行（或服务已停止）期间发生的删除不会被记录；若对端先推回文件，也可能被恢复。它是「尽力而为」的，重要存档仍建议另做备份。
+- **路径安全**：共享夹根目录由 `safe_join` 统一校验，拒绝 `..`、绝对路径、Windows 驱动器前缀（`D:evil`）、NTFS 数据流、保留设备名，P2P 接收与 WebDAV 恢复都走同一套规则。
 
 ## 配置文件
 
@@ -117,13 +121,13 @@ python -m PyInstaller -F -w -n GameSaveSync run.py
 
 在界面「WebDAV 云盘备份」区填入地址、用户名、密码，勾选「启用」后点「保存」。之后：
 
-- **自动备份**：随同步间隔周期比对本地扫描与已上传状态，只上传有变化的文件（状态记录在程序目录 `webdav_state.json`，首次运行会全量上传）。
+- **自动备份**：随同步间隔周期比对本地扫描与已上传状态，只上传有变化的文件（状态记录在数据目录的 `webdav_state.json`，首次运行会全量上传）。
 - **远端目录**：`<WebDAV地址>/<webdav_dir，默认 GameSaveSync>/<共享夹名>/<相对路径>`，目录自动逐级创建。
 - **删除联动**：勾选了「删除镜像」时，本机删除也会删除云端对应文件；默认只增不删。
 - **立即备份**：按钮手动触发一次全量比对。
 - **从云端恢复**：点「从云端恢复…」选择共享夹，把云端文件下载回本地。两种模式：
   - **仅补齐缺失**（默认，更安全）：只恢复本地没有的文件，本地已有的（哪怕版本更旧）一律不动；
-  - **云端覆盖本地**：以云端版本为准，强制覆盖本地所有文件——适合换电脑或存档损坏时整体回滚。
+  - **云端覆盖本地**：以云端版本为准，强制覆盖云端存在的本地文件（本地独有的文件保留）——适合换电脑或存档损坏时整体回滚。
   - 恢复按云端时间戳还原文件修改时间，且会同步更新备份状态，不会被下一轮备份重复上传。
 - **忽略证书错误**：遇到 `CERTIFICATE_VERIFY_FAILED`（自签名证书，或系统证书库里的 CA 交叉证书已过期导致的链校验失败）时勾选此项。流量仍然 TLS 加密，只是不再校验服务器身份——请只对自己可控的服务器启用。
 
@@ -147,7 +151,11 @@ GameSaveSync/
 │  ├─ tray.py                # 系统托盘（纯 ctypes）
 │  └─ app.py                 # tkinter 界面
 └─ tests/
-   └─ test_protocol.py       # 协议与增量重建单元测试
+   ├─ test_protocol.py       # 协议、LWW、增量重建与路径安全
+   ├─ test_config.py         # 配置路径、端口校验与旧配置迁移
+   ├─ test_engine.py         # 地址解析
+   ├─ test_engine_sync.py    # 本机回环双引擎：握手/推拉/删除/重启
+   └─ test_webdav.py         # WebDAV 备份/恢复（内嵌 mock 服务器）
 ```
 
 ## 协议速览
@@ -161,8 +169,8 @@ GameSaveSync/
 | `sig_req` → `sig` | 双向 | 索取对端旧文件的分块 MD5 签名 |
 | `push` | 双向 | 推送文件（`delta:1` 时为变化块） |
 | `pull` → `file` | 双向 | 拉取文件（带 `basis` 时可回增量） |
-| `delete` | 双向 | 删除镜像 |
-| `ping` / `pong` | 双向 | 心跳 |
+| `delete` | 双向 | 删除镜像（两端都开启才生效） |
+| `ping` | 主动方 → 被动方 | 单向心跳保活（被动方 2 分钟无数据即断开） |
 
 ## 测试
 
@@ -184,7 +192,9 @@ python -m unittest discover -s tests -v
 
 - 仅支持两台电脑之间的同步（更接近「双机镜像」而非多端集群）。
 - 只按 mtime + size 判断新旧，不做内容哈希比对；两端时钟偏差大时可能反复互推（内置 2 秒容忍）。
-- 删除镜像不持久化墓碑，程序未运行期间的删除不会传播。
+- 删除镜像不持久化墓碑，程序未运行或服务已停止期间的删除不会传播；且需要两端都开启。
+- 连接由主动点击「连接」的一方驱动同步轮；断线后需要手动重连（被动方的文件变化和删除仍会在下一轮被主动方拉取/传播）。
+- 只支持同版本（v1.3.0+）互连：握手新增了双向认证，旧版本会被拒绝。
 - 界面为 tkinter 原生控件，仅保证 Windows 下显示正常。
 
 ## 贡献
@@ -206,9 +216,10 @@ A dependency-free Windows tool that syncs game save folders between two PCs — 
 - Auto-discovery on LAN (IPv4 broadcast + IPv6 link-local multicast), manual IPv6 address for remote peers
 - Bidirectional sync with last-write-wins, 2 s clock drift tolerance
 - Block-level incremental transfer (256 KB blocks, MD5) for files over 1 MB — only changed blocks go over the wire
-- Optional mirror-delete (off by default, so a stray delete never wipes the other machine)
-- Atomic writes (`*.part` + `os.replace`), original mtime preserved
-- HMAC-SHA256 pairing handshake, path-traversal protection on the receiving side
+- Optional mirror-delete (off by default; must be enabled on **both** ends, so a stray delete never wipes the other machine)
+- Atomic writes (`*.part` + `os.replace`), original mtime preserved, partial `.part` files cleaned up
+- Mutual HMAC-SHA256 pairing handshake (both ends prove knowledge of the code), strict path-traversal protection for P2P and WebDAV restore
+- Heartbeat every 15 s and I/O timeouts, so a sleeping or vanished peer cannot wedge the sync loop
 - WebDAV cloud backup (Cloudreve/Nutstore/Nextcloud) — incremental, independent of P2P sync
 - Tray icon: closing the window keeps syncing in the background
 
@@ -230,6 +241,6 @@ On both machines: set the **same pairing code**, add a share with the **same nam
 python -m unittest discover -s tests -v
 ```
 
-**Notes** — Windows only (uses `tkinter` + Win32 tray API); IPv6 remote mode requires a global IPv6 address on both ends and an inbound-allowed TCP 29876. Save files are compared by mtime + size, not content hash; keep system clocks in sync (NTP).
+**Notes** — Windows only (uses `tkinter` + Win32 tray API); IPv6 remote mode requires a global IPv6 address on both ends and an inbound-allowed TCP 29876. Save files are compared by mtime + size, not content hash; keep system clocks in sync (NTP). Both ends must run v1.3.0+ (the handshake now authenticates the server as well). The side that clicks *Connect* drives the sync rounds; reconnect manually after a network drop.
 
 MIT licensed.

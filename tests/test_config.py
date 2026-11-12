@@ -19,6 +19,21 @@ from src import config as cfgmod
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+class ConfigValueTest(unittest.TestCase):
+    def test_port_range_is_validated_on_write(self):
+        c = cfgmod.Config({})
+        for bad in (80, 70000, -1):
+            with self.assertRaises(ValueError):
+                c.port = bad
+            self.assertEqual(c.port, cfgmod.DEFAULT_PORT)
+        c.port = 23456
+        self.assertEqual(c.port, 23456)
+
+    def test_invalid_stored_port_falls_back(self):
+        c = cfgmod.Config({"port": "not-a-port"})
+        self.assertEqual(c.port, cfgmod.DEFAULT_PORT)
+
+
 class ConfigPathTest(unittest.TestCase):
     def tearDown(self):
         importlib.reload(cfgmod)  # 恢复正常（非 frozen）状态

@@ -29,6 +29,8 @@ class App:
         self.tray = traymod.TrayIcon("游戏存档同步 GameSaveSync", self.tray_q)
         self.engine = SyncEngine(self.cfg, self._enqueue_log)
         self._balloon_shown = False
+        self._peer_sig = None
+        self._peer_targets = []
 
         root.title(f"游戏存档同步 · GameSaveSync v{cfgmod.VERSION}")
         geometry = self.cfg.window_geometry or "780x640"
@@ -152,10 +154,6 @@ class App:
                         variable=self.var_webdav).grid(
             row=0, column=0, columnspan=4, sticky="w", padx=8, pady=(8, 2))
 
-        rows = [
-            ("服务器地址：", "ent_wd_url", self.cfg.webdav_url, 46, ""),
-            ("用户名：", "ent_wd_user", self.cfg.webdav_user, 22, "密码："),
-        ]
         ttk.Label(wd, text="服务器地址：").grid(row=1, column=0, sticky="e", padx=8, pady=4)
         self.ent_wd_url = ttk.Entry(wd)
         self.ent_wd_url.insert(0, self.cfg.webdav_url)
@@ -215,10 +213,12 @@ class App:
                                                     daemon=True).start()).grid(
             row=0, column=4, padx=10)
         self.var_delete = tk.BooleanVar(value=self.cfg.delete_mirror)
-        ttk.Checkbutton(opt, text="删除镜像（对端删除也删，谨慎）", variable=self.var_delete,
+        ttk.Checkbutton(opt, text="删除镜像（两端都开启才会互相传播删除，谨慎）",
+                        variable=self.var_delete,
                         command=self._save_options).grid(
             row=1, column=0, columnspan=2, sticky="w", padx=8, pady=4)
-        ttk.Label(opt, text="默认只新增/覆盖，不删除文件，避免误删存档；WebDAV 备份的删除联动也随此选项。",
+        ttk.Label(opt, text="默认只新增/覆盖，不删除文件；任一端关闭时，对端发来的删除会被忽略，"
+                            "文件会在下一轮从对端恢复。WebDAV 备份的删除联动也随此选项。",
                   foreground="#888").grid(row=1, column=2, columnspan=3, sticky="w", padx=6)
 
         dataf = ttk.LabelFrame(tab, text="数据存放")
@@ -250,29 +250,51 @@ class App:
             self.btn_service.config(text="启动服务")
             self.lbl_status.config(text="已停止", foreground="#b3261e")
         else:
-            try:
-                self._save_basic(silent=True)
-                self.engine.start()
-                self.btn_service.config(text="停止服务")
-                self.lbl_status.config(text="监听中", foreground="#1a7f37")
-            except OSError as e:
-                messagebox.showerror("启动失败", f"端口 {self.cfg.port} 无法绑定：\n{e}\n可换一个端口再试。")
+            if not self._save_basic(silent=True):
+                return
+            self._start_engine()
+
+    def _start_engine(self) -> bool:
+        try:
+            self.engine.start()
+        except OSError as e:
+            self.btn_service.config(text="启动服务")
+            self.lbl_status.config(text="已停止", foreground="#b3261e")
+            messagebox.showerror("启动失败", f"端口 {self.cfg.port} 无法绑定：\n{e}\n可换一个端口再试。")
+            return False
+        self.btn_service.config(text="停止服务")
+        self.lbl_status.config(text="监听中", foreground="#1a7f37")
+        return True
 
     def _regen_token(self):
         self.ent_token.delete(0, "end")
         self.ent_token.insert(0, cfgmod.generate_token())
         self._save_basic(silent=True)
 
-    def _save_basic(self, silent=False):
+    def _save_basic(self, silent=False) -> bool:
         try:
-            self.cfg.device_name = self.ent_name.get()
-            self.cfg.token = self.ent_token.get()
-            self.cfg.port = int(self.ent_port.get())
-            self.cfg.save()
-            if not silent:
-                messagebox.showinfo("已保存", "本机设置已保存。")
+            port = int(self.ent_port.get())
         except ValueError:
+            port = 0
+        if not (1024 <= port <= 65535):
             messagebox.showerror("错误", "端口必须是 1024-65535 的数字。")
+            return False
+        old_port = self.cfg.port
+        self.cfg.device_name = self.ent_name.get()
+        self.cfg.token = self.ent_token.get()
+        self.cfg.port = port
+        self.cfg.save()
+        if not silent:
+            if self.engine.running and port != old_port:
+                # 重启后监听新端口；重启路径已修复，发现与云备份会一并恢复
+                self.engine.stop()
+                if self._start_engine():
+                    messagebox.showinfo("已保存", f"本机设置已保存，服务已在端口 {port} 重新启动。")
+                else:
+                    messagebox.showwarning("已保存", "本机设置已保存，但新端口无法监听，服务已停止。")
+            else:
+                messagebox.showinfo("已保存", "本机设置已保存。")
+        return True
 
     def _save_options(self):
         self.cfg.auto_sync = self.var_auto.get()
@@ -410,12 +432,12 @@ class App:
 
     def _connect_selected(self):
         sel = self.lst_peers.curselection()
-        if not sel:
+        if not sel or sel[0] >= len(self._peer_targets):
             return
-        item = self.lst_peers.get(sel[0])
-        # 列表项格式：名称  [v4/v6]  addr:port
-        addr = item.split()[-1]
-        threading.Thread(target=self.engine.connect, args=(addr,), daemon=True).start()
+        # 用提前算好的连接目标，而不是从显示文本里切最后一个词：
+        # 设备名可以含空格，IPv6 地址必须写成 [addr]:port
+        target = self._peer_targets[sel[0]]
+        threading.Thread(target=self.engine.connect, args=(target,), daemon=True).start()
 
     # ---------------- 窗口尺寸 ----------------
     def _remember_geometry(self):
@@ -474,10 +496,19 @@ class App:
         self.root.after(300, self._poll_log)
 
     def _poll_peers(self):
-        self.lst_peers.delete(0, "end")
-        for p in self.engine.discovery.snapshot():
-            tag = "v6" if p["v6"] else "v4"
-            self.lst_peers.insert("end", f"{p['name']}  [{tag}]  {p['addr']}:{p['port']}")
+        peers = self.engine.discovery.snapshot()
+        sig = tuple((p["name"], p["addr"], p["port"], p["v6"]) for p in peers)
+        if sig != self._peer_sig:
+            # 只有列表内容变化时才重建，避免每 3 秒清掉用户的选择
+            self._peer_sig = sig
+            self._peer_targets = []
+            self.lst_peers.delete(0, "end")
+            for p in peers:
+                host = p["addr"]
+                target = f"[{host}]:{p['port']}" if ":" in host else f"{host}:{p['port']}"
+                self._peer_targets.append(target)
+                tag = "v6" if p["v6"] else "v4"
+                self.lst_peers.insert("end", f"{p['name']}  [{tag}]  {target}")
         self.root.after(3000, self._poll_peers)
 
 
